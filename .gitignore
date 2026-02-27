@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+reports/history.db
+reports/last.json
+reports/report.html
+.coverage
+.pytest_cache/
+dist/
+*.egg-info/

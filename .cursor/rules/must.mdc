@@ -1,0 +1,7 @@
+---
+alwaysApply: true
+---
+- 中文回复
+- 类型注解完整
+- 禁止裸 except
+- 禁止直接 print（使用 logging）
