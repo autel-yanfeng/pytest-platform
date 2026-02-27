@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>{{ title }}</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, sans-serif; margin: 0; background: #f5f5f5; color: #333; }
+  .hd { background: #1a1a2e; color: #fff; padding: 20px 32px; }
+  .hd h1 { margin: 0; font-size: 20px; }
+  .hd p { margin: 4px 0 0; opacity: .6; font-size: 13px; }
+  .wrap { max-width: 1000px; margin: 20px auto; padding: 0 16px; }
+  .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+  .card { background: #fff; border-radius: 8px; padding: 18px; text-align: center; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+  .card .n { font-size: 32px; font-weight: 700; }
+  .card .l { font-size: 12px; color: #888; margin-top: 4px; }
+  .green { color: #22c55e; } .red { color: #ef4444; }
+  .amber { color: #f59e0b; } .blue { color: #3b82f6; }
+  .sec { background: #fff; border-radius: 8px; padding: 18px; margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+  .sec h2 { margin: 0 0 14px; font-size: 15px; border-bottom: 1px solid #eee; padding-bottom: 8px; }
+  table { width: 100%; border-collapse: collapse; }
+  td, th { padding: 8px 10px; border-bottom: 1px solid #f0f0f0; vertical-align: top; text-align: left; }
+  tr:last-child td { border-bottom: none; }
+  .bar-wrap { display: flex; align-items: center; gap: 6px; }
+  .bar { height: 14px; border-radius: 2px; min-width: 2px; }
+  .bar-p { background: #22c55e; } .bar-f { background: #ef4444; }
+  pre { margin: 0; font-size: 11px; color: #666; white-space: pre-wrap; word-break: break-all; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; }
+  .tag-ok { background: #dcfce7; color: #16a34a; }
+  .tag-fail { background: #fee2e2; color: #dc2626; }
+</style>
+</head>
+<body>
+<div class="hd">
+  <h1>🧪 {{ title }}</h1>
+  <p>生成时间：{{ generated_at }} &nbsp;|&nbsp; 数据来源：Master API</p>
+</div>
+<div class="wrap">
+
+  {# 摘要卡片 #}
+  {% set last = runs[0] if runs else {} %}
+  <div class="cards">
+    <div class="card"><div class="n green">{{ last.get('passed', 0) }}</div><div class="l">通过</div></div>
+    <div class="card"><div class="n red">{{ last.get('failed', 0) }}</div><div class="l">失败</div></div>
+    <div class="card"><div class="n amber">{{ last.get('skipped', 0) }}</div><div class="l">跳过</div></div>
+    <div class="card"><div class="n blue">{{ last.get('pass_rate', 0) }}%</div><div class="l">通过率</div></div>
+  </div>
+
+  {# 执行概况 #}
+  <div class="sec">
+    <h2>⏱ 执行概况</h2>
+    <table>
+      <tr><td>总用例</td><td>{{ last.get('total', 0) }}</td>
+          <td>耗时</td><td>{{ last.get('duration', 0) }}s</td>
+          <td>Worker</td><td>{{ last.get('worker_id', '-') }}</td>
+          <td>分支</td><td>{{ last.get('branch', '-') }}</td></tr>
+    </table>
+  </div>
+
+  {# 失败用例 #}
+  <div class="sec">
+    <h2>❌ 失败用例</h2>
+    {% if failures %}
+    <table>
+      {% for f in failures %}
+      <tr>
+        <td style="color:#ef4444;font-size:13px;width:40%">{{ f.nodeid }}</td>
+        <td><pre>{{ f.message[:400] }}</pre></td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+    <p class="green">✅ 无失败用例</p>
+    {% endif %}
+  </div>
+
+  {# 历史趋势 #}
+  <div class="sec">
+    <h2>📈 历史趋势（最近 {{ trend | length }} 次）</h2>
+    {% set max_total = trend | map(attribute='total') | max | default(1) %}
+    <table>
+      {% for r in trend %}
+      {% set pw = (r.passed / max_total * 280) | int %}
+      {% set fw = (r.failed / max_total * 280) | int %}
+      <tr>
+        <td style="color:#888;font-size:12px;width:140px">{{ r.timestamp[:16] }}</td>
+        <td>
+          <div class="bar-wrap">
+            <div class="bar bar-p" style="width:{{ pw }}px"></div>
+            <div class="bar bar-f" style="width:{{ fw }}px"></div>
+          </div>
+        </td>
+        <td style="font-weight:bold;width:50px">{{ r.pass_rate }}%</td>
+        <td style="color:#888;font-size:12px">{{ r.worker_id }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+
+  {# 高频失败 #}
+  <div class="sec">
+    <h2>🔥 高频失败排行</h2>
+    {% if failure_stats %}
+    <table>
+      <tr><th>失败次数</th><th>用例</th></tr>
+      {% for s in failure_stats[:10] %}
+      <tr>
+        <td><span class="tag tag-fail">{{ s.fail_count }}</span></td>
+        <td style="font-size:13px">{{ s.nodeid }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+    <p style="color:#888">暂无数据</p>
+    {% endif %}
+  </div>
+
+  {# Worker 状态 #}
+  <div class="sec">
+    <h2>🖥 Worker 状态</h2>
+    <table>
+      <tr><th>Worker ID</th><th>运行次数</th><th>平均通过率</th><th>最后上报</th></tr>
+      {% for w in workers %}
+      <tr>
+        <td>{{ w.worker_id }}</td>
+        <td>{{ w.run_count }}</td>
+        <td>
+          <span class="tag {{ 'tag-ok' if w.avg_pass_rate >= 80 else 'tag-fail' }}">
+            {{ "%.1f"|format(w.avg_pass_rate) }}%
+          </span>
+        </td>
+        <td style="color:#888;font-size:12px">{{ w.last_seen[:16] }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+
+</div>
+</body>
+</html>
