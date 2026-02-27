@@ -9,9 +9,13 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse
+import logging
+
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from master.core.storage import MasterStorage
@@ -24,6 +28,17 @@ app = FastAPI(
 )
 storage = MasterStorage()
 renderer = Renderer()
+
+
+# ── 全局异常处理 ──────────────────────────────────────────
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.exception(f"Unhandled error on {request.method} {request.url.path}")
+    return JSONResponse(
+        status_code=500,
+        content={"error": type(exc).__name__, "detail": str(exc)},
+    )
 
 
 # ── 数据模型 ──────────────────────────────────────────────
@@ -107,17 +122,21 @@ def html_report(
     聚合所有维度数据，使用 Jinja2 模板渲染完整 HTML 报告。
     MCP 直接调用此接口，无需在 MCP 层做任何渲染逻辑。
     """
-    runs   = storage.get_runs(worker_id=worker_id, project=project, branch=branch, limit=1)
-    # 需要失败明细，单独查详情
-    if runs:
-        detail = storage.get_run(runs[0]["run_id"])
-        runs[0]["failures"] = detail.get("failures", []) if detail else []
+    try:
+        runs = storage.get_runs(worker_id=worker_id, project=project,
+                                branch=branch, limit=1)
+        if runs:
+            detail = storage.get_run(runs[0]["run_id"])
+            runs[0]["failures"] = detail.get("failures", []) if detail else []
 
-    trend  = storage.get_trend(project=project, limit=trend_limit)
-    stats  = storage.get_failure_stats(project=project, limit=20)
-    wks    = storage.get_workers()
-    html   = renderer.render_report(runs, trend, stats, wks, project=project or "")
-    return HTMLResponse(content=html)
+        trend = storage.get_trend(project=project, limit=trend_limit)
+        stats = storage.get_failure_stats(project=project, limit=20)
+        wks   = storage.get_workers()
+        html  = renderer.render_report(runs, trend, stats, wks, project=project or "")
+        return HTMLResponse(content=html)
+    except Exception as e:
+        logger.exception("render /report/html failed")
+        raise HTTPException(status_code=500, detail=f"报告生成失败: {e}") from e
 
 
 @app.get("/health", summary="健康检查")
