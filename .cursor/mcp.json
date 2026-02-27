@@ -1,9 +1,12 @@
 {
   "mcpServers": {
-    "test-platform": {
+    "pytest-platform": {
       "command": "python",
       "args": ["mcp/server.py"],
-      "cwd": "${workspaceFolder}"
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "MASTER_URL": "http://localhost:8080"
+      }
     }
   }
 }

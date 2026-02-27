@@ -1,154 +1,98 @@
 # 🧪 pytest-platform
 
-> **平台能力优先，AI 是调用者而非依赖项。**
->
-> 脱离 AI 可独立运行完整测试流程；接入 MCP 后，AI 工具可自然语言驱动测试平台。
+> **Master-Worker 分布式测试平台**
+> - Master：纯数据服务，只提供 JSON API，不生成页面
+> - Worker：执行测试，异步上报结果
+> - MCP：聚合渲染层，等效前端渲染，按需生成 HTML 报告
 
 ---
 
 ## 架构
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                测试平台（自治层）                      │
-│                                                      │
-│  CLI / REST API                                      │
-│       ↓                                              │
-│  core/runner ──→ conftest hooks                      │
-│  (执行测试)           ↓  非阻塞 put()                 │
-│               AsyncCollector queue                   │
-│                      ↓  后台线程消费                  │
-│               core/storage  →  core/reporter         │
-│               (SQLite历史)      (HTML报告)            │
-│                                                      │
-│  ✅ 完全独立，无 AI 依赖                               │
-│  ✅ Hook 异步采集，不阻塞测试执行                       │
-└──────────────────┬──────────────────────────────────┘
-                   │ MCP Server（标准接口层）
-        ┌──────────┴──────────┐
-        │                     │
-   Cursor / Claude        其他 AI 工具
-   自然语言驱动测试         标准 MCP 协议接入
+┌─────────────────┐     POST /results      ┌─────────────────────────┐
+│   Worker 节点    │  ──────────────────→  │     Master 服务          │
+│                 │                        │                          │
+│  pytest 执行    │                        │  FastAPI REST（纯 JSON）  │
+│  AsyncCollector │   Worker 可以是：       │  SQLite 存储             │
+│  后台线程上报    │   - 本地机器            │  多 Worker 数据汇聚       │
+│                 │   - Docker 容器         │  不生成任何 HTML          │
+│  WORKER_ID      │   - CI Runner           │                          │
+│  PROJECT        │   - 远程服务器           └────────────┬────────────┘
+│  BRANCH         │                                       │ JSON API
+└─────────────────┘                                       │
+                                               ┌──────────▼──────────┐
+                                               │    MCP Server        │
+                                               │   （聚合渲染层）       │
+                                               │                      │
+                                               │  查询 Master API     │
+                                               │  聚合多维度数据        │
+                                               │  渲染 HTML 报告       │
+                                               │  返回给 AI 工具        │
+                                               └─────────────────────┘
 ```
 
-### Hook 异步采集原理
+### 分层职责
 
-```
-pytest 主线程                    后台 daemon 线程
-─────────────────                ─────────────────
-测试执行...
-pytest_sessionfinish()
-  └─ RunResult 构建（纯内存）
-  └─ queue.put_nowait()  ──────→ 消费队列
-     （μs 级，立即返回）            └─ SQLite 写入
-测试进程继续...                     └─ HTML 报告生成
-stop(timeout=5s) ────────────→  join() 等待完成
-进程退出                         线程销毁
-```
-
-**关键点：**
-- Hook 回调只做内存操作（构建 dataclass + put），不碰磁盘
-- 所有 I/O（SQLite、HTML）在 daemon 线程中完成
-- `stop()` 用哨兵 + `join()` 确保进程退出前数据落盘
+| 层级 | 组件 | 职责 | 是否生成 HTML |
+|------|------|------|:---:|
+| 执行层 | Worker conftest | pytest 执行 + 异步上报 | ❌ |
+| 数据层 | Master API | JSON 存取，多 Worker 汇聚 | ❌ |
+| 渲染层 | MCP Server | 聚合数据，按需渲染 HTML | ✅ |
 
 ---
 
 ## 快速开始
 
-### 安装依赖
+### 1. 启动 Master 服务
 
 ```bash
 pip install -r requirements.txt
+uvicorn master.api.server:app --host 0.0.0.0 --port 8080
 ```
 
-### 方式一：CLI（最简单）
+### 2. 配置 Worker 节点
+
+将 `worker/conftest.py` 放到测试项目根目录，设置环境变量：
 
 ```bash
-# 运行全部测试
-python cli.py run
+export MASTER_URL=http://your-master:8080
+export WORKER_ID=ci-runner-01       # Worker 标识（默认 hostname）
+export PROJECT=my-service           # 项目名
+export BRANCH=main                  # 分支名
 
-# 按 marker 运行
-python cli.py run --markers smoke
-
-# 运行单个测试
-python cli.py run --test-id tests/test_example.py::TestDivide::test_divide_normal
-
-# 查看最近结果
-python cli.py report
-
-# 查看趋势
-python cli.py trend
-
-# 查看失败用例
-python cli.py failures
-
-# 高频失败统计
-python cli.py stats
+pytest tests/
+# → 测试完成后自动异步上报到 Master
 ```
 
-### 方式二：REST API
+### 3. 接入 Cursor MCP
 
-```bash
-# 启动 API 服务
-uvicorn api.server:app --reload --port 8080
-
-# 执行测试
-curl -X POST http://localhost:8080/run \
-  -H "Content-Type: application/json" \
-  -d '{"path": "tests/", "markers": "smoke"}'
-
-# 查看最近结果
-curl http://localhost:8080/report/last
-
-# 查看趋势
-curl http://localhost:8080/report/trend
-
-# 浏览器查看 HTML 报告
-open http://localhost:8080/report/html
-```
-
-API 文档：http://localhost:8080/docs
-
-### 方式三：Cursor AI 调用（MCP）
-
-**配置 `.cursor/mcp.json`（已内置）：**
+配置 `.cursor/mcp.json`（已内置）：
 
 ```json
 {
   "mcpServers": {
-    "test-platform": {
+    "pytest-platform": {
       "command": "python",
       "args": ["mcp/server.py"],
-      "cwd": "${workspaceFolder}"
+      "env": { "MASTER_URL": "http://your-master:8080" }
     }
   }
 }
 ```
 
-重启 Cursor 后，在 Chat 中可直接说：
+在 Cursor Chat 中使用：
 
 ```
-运行 smoke 标签的测试，分析失败原因
-→ AI 自动调用 run_tests + get_failures，输出分析报告
+生成 my-service 项目的测试报告
+→ MCP 查询 Master，聚合数据，渲染 HTML 返回
 
-最近测试趋势怎么样？
-→ AI 调用 get_trend，解读变化
+哪些 Worker 最近在跑测试？
+→ MCP 调用 get_workers，返回状态
 
-哪些测试最容易失败？
-→ AI 调用 get_failure_stats，给出建议
+main 分支最近10次趋势怎么样？
+→ MCP 调用 get_trend(project=my-service)
 ```
-
----
-
-## MCP 工具列表
-
-| 工具名 | 功能 | 参数 |
-|--------|------|------|
-| `run_tests` | 执行测试 | path, markers, test_id |
-| `get_last_report` | 最近结果摘要 | 无 |
-| `get_failures` | 失败用例+堆栈 | 无 |
-| `get_trend` | 通过率趋势 | limit |
-| `get_failure_stats` | 高频失败统计 | limit |
 
 ---
 
@@ -156,57 +100,86 @@ API 文档：http://localhost:8080/docs
 
 ```
 pytest-platform/
+├── master/
+│   ├── core/storage.py     # SQLite 存储（多 Worker 汇聚）
+│   └── api/server.py       # FastAPI REST，纯 JSON，无 HTML
+├── worker/
+│   ├── conftest.py         # Worker pytest hooks（异步上报）
+│   └── reporter.py         # POST 到 Master 的适配器
 ├── core/
-│   ├── runner.py       # pytest 执行器
-│   ├── storage.py      # SQLite 历史存储
-│   └── reporter.py     # HTML 报告生成
-├── api/
-│   └── server.py       # FastAPI REST 接口
+│   ├── collector.py        # AsyncCollector（queue + daemon thread）
+│   ├── runner.py           # 本地执行器（单机模式用）
+│   └── storage.py          # 本地 SQLite（Worker 可选缓存）
 ├── mcp/
-│   └── server.py       # MCP Server（AI 接口层）
-├── cli.py              # 命令行入口
-├── tests/
-│   └── test_example.py # 示例测试
+│   └── server.py           # MCP Server，聚合渲染层
 ├── .cursor/
-│   ├── mcp.json        # Cursor MCP 配置
-│   ├── rules/must.mdc  # AI 规范
-│   └── skills/         # AI 操作模板
+│   ├── mcp.json            # Cursor MCP 配置
+│   └── skills/             # AI 操作模板
 └── requirements.txt
 ```
 
 ---
 
-## 设计原则
+## MCP 工具列表
+
+| 工具 | 功能 | 返回 |
+|------|------|------|
+| `get_report` | 聚合所有数据，渲染完整 HTML 报告 | HTML 字符串 |
+| `get_summary` | 最近 N 次运行摘要 | JSON |
+| `get_trend` | 通过率趋势 | JSON |
+| `get_failures` | 最近一次失败明细 | JSON |
+| `get_workers` | 所有 Worker 状态 | JSON |
+| `get_failure_stats` | 高频失败用例排行 | JSON |
+
+---
+
+## Master API 接口
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/results` | Worker 上报测试结果 |
+| GET  | `/results` | 查询运行列表（支持过滤） |
+| GET  | `/results/{run_id}` | 单次运行详情+失败明细 |
+| GET  | `/trend` | 通过率趋势 |
+| GET  | `/workers` | Worker 状态汇总 |
+| GET  | `/failures/stats` | 高频失败统计 |
+| GET  | `/health` | 健康检查 |
+
+完整 Swagger 文档：`http://master:8080/docs`
+
+---
+
+## Hook 异步采集原理
 
 ```
-平台 = 自治体
-  ✅ CLI 可独立运行
-  ✅ REST API 供 CI/CD 集成
-  ✅ SQLite 持久化历史，无外部依赖
-  ✅ HTML 报告本地生成
-
-MCP = 标准接口
-  ✅ AI 是众多调用者之一，不是依赖项
-  ✅ 平台能力不因 AI 不可用而受影响
-  ✅ 任何支持 MCP 协议的 AI 工具均可接入
+pytest 主线程（Worker）              后台 daemon 线程
+────────────────────                 ────────────────
+测试用例执行...
+pytest_sessionfinish()
+  构建 RunResult（内存操作）
+  queue.put_nowait()  ────────────→  取出 RunResult
+  ← μs 级返回                         POST /results → Master
+测试进程继续收尾...                    Master 写 SQLite
+stop(timeout=10s) ─────────────────→ join() 等完成
+进程退出
 ```
 
 ---
 
-## CI/CD 集成示例
+## CI/CD 集成
 
 ```yaml
 # .github/workflows/test.yml
 - name: Run Tests
+  env:
+    MASTER_URL: ${{ secrets.MASTER_URL }}
+    WORKER_ID:  ${{ runner.name }}
+    PROJECT:    my-service
+    BRANCH:     ${{ github.ref_name }}
   run: |
     pip install -r requirements.txt
-    python cli.py run
-    
-- name: Upload Report
-  uses: actions/upload-artifact@v3
-  with:
-    name: test-report
-    path: reports/report.html
+    cp worker/conftest.py ./conftest.py
+    pytest tests/
 ```
 
 ---
