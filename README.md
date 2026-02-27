@@ -9,22 +9,47 @@
 ## 架构
 
 ```
-┌─────────────────────────────────────────────────┐
-│              测试平台（自治层）                    │
-│                                                  │
-│  CLI / REST API                                  │
-│       ↓                                          │
-│  core/runner  →  core/storage  →  core/reporter  │
-│  (执行测试)       (SQLite历史)     (HTML报告)      │
-│                                                  │
-│  ✅ 完全独立，无 AI 依赖                           │
-└──────────────────┬──────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│                测试平台（自治层）                      │
+│                                                      │
+│  CLI / REST API                                      │
+│       ↓                                              │
+│  core/runner ──→ conftest hooks                      │
+│  (执行测试)           ↓  非阻塞 put()                 │
+│               AsyncCollector queue                   │
+│                      ↓  后台线程消费                  │
+│               core/storage  →  core/reporter         │
+│               (SQLite历史)      (HTML报告)            │
+│                                                      │
+│  ✅ 完全独立，无 AI 依赖                               │
+│  ✅ Hook 异步采集，不阻塞测试执行                       │
+└──────────────────┬──────────────────────────────────┘
                    │ MCP Server（标准接口层）
         ┌──────────┴──────────┐
         │                     │
    Cursor / Claude        其他 AI 工具
    自然语言驱动测试         标准 MCP 协议接入
 ```
+
+### Hook 异步采集原理
+
+```
+pytest 主线程                    后台 daemon 线程
+─────────────────                ─────────────────
+测试执行...
+pytest_sessionfinish()
+  └─ RunResult 构建（纯内存）
+  └─ queue.put_nowait()  ──────→ 消费队列
+     （μs 级，立即返回）            └─ SQLite 写入
+测试进程继续...                     └─ HTML 报告生成
+stop(timeout=5s) ────────────→  join() 等待完成
+进程退出                         线程销毁
+```
+
+**关键点：**
+- Hook 回调只做内存操作（构建 dataclass + put），不碰磁盘
+- 所有 I/O（SQLite、HTML）在 daemon 线程中完成
+- `stop()` 用哨兵 + `join()` 确保进程退出前数据落盘
 
 ---
 
